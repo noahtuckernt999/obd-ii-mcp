@@ -24,6 +24,8 @@ class Settings(BaseModel):
     baud_rates: list[int] = Field(default_factory=lambda: [38400, 9600])
     read_timeout_ms: int = 2000
     session_dir: Path = Path(".obd-mcp/sessions")
+    capture_dir: Path = Path(".obd-mcp/captures")
+    replay_file: Path | None = None
     vehicle_profile: str = "generic"
 
     @property
@@ -38,5 +40,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         baud_rates=_csv_ints(source.get("OBD_MCP_BAUD_RATES"), [38400, 9600]),
         read_timeout_ms=int(source.get("OBD_MCP_READ_TIMEOUT_MS", "2000")),
         session_dir=Path(source.get("OBD_MCP_SESSION_DIR", ".obd-mcp/sessions")),
+        capture_dir=Path(source.get("OBD_MCP_CAPTURE_DIR", ".obd-mcp/captures")),
+        replay_file=Path(source["OBD_MCP_REPLAY_FILE"]) if source.get("OBD_MCP_REPLAY_FILE") else None,
         vehicle_profile=source.get("OBD_MCP_VEHICLE_PROFILE", "generic"),
     )

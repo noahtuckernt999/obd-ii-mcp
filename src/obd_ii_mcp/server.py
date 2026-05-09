@@ -58,6 +58,28 @@ def obd_sample_data(
 
 
 @mcp.tool()
+def obd_record_live_data(
+    pids: list[str] | None = None,
+    duration_seconds: float = 30,
+    interval_seconds: float = 1,
+) -> dict[str, Any]:
+    """Record live OBD-II PID samples to a replayable local capture file."""
+    return result_or_error(lambda: service.record_live_data(pids, duration_seconds, interval_seconds))
+
+
+@mcp.tool()
+def obd_probe_enhanced_protocols() -> dict[str, Any]:
+    """Read-only probe for UDS/KWP capability through the current ELM327 adapter session."""
+    return result_or_error(service.probe_enhanced_protocols)
+
+
+@mcp.tool()
+def obd_read_data_identifier(did: str = "F190", ecu_header: str = "7E0") -> dict[str, Any]:
+    """Read an allow-listed UDS data identifier with service 22."""
+    return result_or_error(lambda: service.read_data_identifier(did, ecu_header))
+
+
+@mcp.tool()
 def obd_fault_snapshot(pids: list[str] | None = None) -> dict[str, Any]:
     """Capture DTCs plus relevant live data and persist a local JSON session file."""
     return result_or_error(lambda: service.fault_snapshot(pids))

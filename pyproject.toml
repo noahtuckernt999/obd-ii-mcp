@@ -8,10 +8,12 @@ dependencies = [
     "mcp[cli]>=1.21.0",
     "pydantic>=2.7",
     "pyserial>=3.5",
+    "streamlit>=1.35",
 ]
 
 [project.scripts]
 obd-ii-mcp = "obd_ii_mcp.server:main"
+obd-ii-dashboard = "obd_ii_mcp.dashboard:main"
 
 [dependency-groups]
 dev = [

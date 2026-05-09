@@ -20,6 +20,14 @@ class UnsupportedPidError(ObdError):
     code = "unsupported_pid"
 
 
+class UnsupportedDataIdentifierError(ObdError):
+    code = "unsupported_data_identifier"
+
+
+class UnsupportedEcuHeaderError(ObdError):
+    code = "unsupported_ecu_header"
+
+
 class MalformedResponseError(ObdError):
     code = "malformed_response"
 

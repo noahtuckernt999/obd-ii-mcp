@@ -92,6 +92,47 @@ class SampleResult(BaseModel):
     series: list[DataSeries]
 
 
+class LiveDataCapture(BaseModel):
+    ok: bool
+    capture_file: str | None = None
+    captured_at: datetime
+    status: ConnectionStatus
+    sample: SampleResult
+
+
+class ProtocolProbeStep(BaseModel):
+    name: str
+    ok: bool
+    request: str | None = None
+    response: list[str] = Field(default_factory=list)
+    value: str | None = None
+    error: str | None = None
+
+
+class EnhancedProtocolProbe(BaseModel):
+    ok: bool
+    status: ConnectionStatus
+    adapter_protocol: str | None = None
+    adapter_protocol_number: str | None = None
+    can_status: str | None = None
+    uds_possible: bool
+    kwp_possible: bool
+    steps: list[ProtocolProbeStep] = Field(default_factory=list)
+
+
+class DataIdentifierReadResult(BaseModel):
+    ok: bool
+    did: str
+    name: str
+    ecu_header: str
+    request: str
+    response: list[str] = Field(default_factory=list)
+    value: str | None = None
+    raw_payload: list[str] = Field(default_factory=list)
+    negative_response: str | None = None
+    error: str | None = None
+
+
 class FaultSnapshot(BaseModel):
     ok: bool
     captured_at: datetime
