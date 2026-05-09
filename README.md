@@ -29,7 +29,8 @@ The first version should expose a conservative set of tools:
 | `obd_live_data` | Read one or more supported PIDs once. |
 | `obd_sample_data` | Sample selected PIDs over time and return graph-ready series data. |
 | `obd_fault_snapshot` | Pull codes plus relevant live data in one diagnostic bundle. |
-| `obd_clear_codes` | Clear DTCs only when the server is configured to allow write actions. |
+
+Write/service tools such as clearing codes are intentionally deferred until after the read-only hardware path is reliable.
 
 ## Safety Boundaries
 
@@ -38,7 +39,7 @@ This project should default to read-only behaviour. Anything that changes vehicl
 Initial safety rules:
 
 - Read-only mode is the default.
-- Clearing codes is disabled unless `OBD_MCP_ALLOW_CLEAR_CODES=true`.
+- Clearing codes and other write/service actions are not implemented in v1.
 - Raw adapter commands are not exposed to MCP clients by default.
 - Tool responses should make uncertainty clear rather than over-diagnosing.
 - The server should never claim that a fault code alone proves a component has failed.
@@ -64,31 +65,55 @@ Suggested internal modules:
 - `dtc`: trouble-code parsing and definition lookup.
 - `sampling`: time-series collection for graph-ready responses.
 
+## Local Setup
+
+Install dependencies and run the test suite:
+
+```powershell
+uv sync --dev
+uv run pytest
+uv run ruff check .
+```
+
+Start the MCP server over stdio:
+
+```powershell
+uv run obd-ii-mcp
+```
+
+For a paired Bluetooth dongle, Windows should expose one or more `Standard Serial over Bluetooth link` COM ports. The server can probe candidate COM ports automatically, or you can narrow probing with:
+
+```powershell
+$env:OBD_MCP_SERIAL_PORTS = "COM4,COM9"
+uv run obd-ii-mcp
+```
+
+The first hardware call to make from an MCP client is `obd_connect`. It sends only adapter-initialisation commands in v1 and does not clear codes or perform service actions.
+
 ## Configuration
 
 Expected configuration values:
 
 | Name | Purpose |
 | --- | --- |
-| `OBD_MCP_ADAPTER_ADDRESS` | Bluetooth device address or serial port path for the adapter. |
-| `OBD_MCP_ADAPTER_NAME` | Optional friendly adapter name to help discovery. |
-| `OBD_MCP_BAUD_RATE` | Serial baud rate, usually `38400` or `9600` for ELM327 adapters. |
+| `OBD_MCP_SERIAL_PORTS` | Optional comma-separated list of COM ports to probe first, for example `COM4,COM9`. |
+| `OBD_MCP_BAUD_RATES` | Optional comma-separated baud rates to try, default `38400,9600`. |
 | `OBD_MCP_READ_TIMEOUT_MS` | Adapter read timeout. |
-| `OBD_MCP_ALLOW_CLEAR_CODES` | Enables the `obd_clear_codes` tool when set to `true`. |
+| `OBD_MCP_SESSION_DIR` | Directory for saved diagnostic session JSON files, default `.obd-mcp/sessions`. |
 | `OBD_MCP_VEHICLE_PROFILE` | Optional vehicle profile, for example `vag`. |
 
 ## First Milestone
 
-- [ ] Choose the implementation stack and MCP SDK.
-- [ ] Add the MCP server entry point.
-- [ ] Implement adapter configuration and connection status.
-- [ ] Implement a mock transport for development without the car attached.
-- [ ] Implement ELM327 initialisation commands.
-- [ ] Implement reading and parsing generic DTCs.
-- [ ] Implement basic PID reads for live data.
-- [ ] Return graph-ready sampled PID data.
-- [ ] Add tests for DTC parsing and PID decoding.
-- [ ] Document local setup with the Bluetooth dongle.
+- [x] Choose the implementation stack and MCP SDK.
+- [x] Add the MCP server entry point.
+- [x] Implement adapter configuration and connection status.
+- [x] Implement a mock transport for development without the car attached.
+- [x] Implement ELM327 initialisation commands.
+- [x] Implement reading and parsing generic DTCs.
+- [x] Implement basic PID reads for live data.
+- [x] Return graph-ready sampled PID data.
+- [x] Add tests for DTC parsing and PID decoding.
+- [x] Document local setup with the Bluetooth dongle.
 
 ## Development Notes
 
