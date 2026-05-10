@@ -34,12 +34,37 @@ BASE_INIT = {
 }
 
 
+def support_response(start: int, pids: list[int]) -> str:
+    payload = [0, 0, 0, 0]
+    for pid in pids:
+        bit_index = pid - start - 1
+        payload[bit_index // 8] |= 1 << (7 - (bit_index % 8))
+    return f"41 {start:02X} {' '.join(f'{value:02X}' for value in payload)}\r>"
+
+
 def test_probe_skips_bad_ports_and_falls_back_baud(tmp_path: Path) -> None:
     service = make_service(tmp_path, {("COM9", 9600): BASE_INIT})
     result = service.connect()
     assert result.ok is True
     assert result.status.port == "COM9"
     assert result.status.baud_rate == 9600
+
+
+def test_disconnect_closes_transport_and_clears_status(tmp_path: Path) -> None:
+    service = make_service(tmp_path, {("COM4", 38400): BASE_INIT})
+    service.connect()
+    transport = service.transport
+    assert transport is not None
+
+    result = service.disconnect()
+
+    assert result.ok is True
+    assert result.released is True
+    assert result.status.connected is False
+    assert service.status().connected is False
+    assert transport.opened is False
+    assert service.transport is None
+    assert service.protocol is None
 
 
 def test_read_codes_with_fake_transport(tmp_path: Path) -> None:
@@ -92,6 +117,23 @@ def test_record_live_data_writes_replayable_capture(tmp_path: Path) -> None:
     assert replay_service.status().protocol == "replay"
     assert result.values[0].pid == "42"
     assert result.values[0].value == 12.439
+
+
+def test_discover_pids_returns_decoded_and_undecoded_supported_pids(tmp_path: Path) -> None:
+    responses = BASE_INIT | {
+        "0100": support_response(0x00, [0x04, 0x05, 0x0C, 0x0D, 0x12, 0x20]),
+        "0120": support_response(0x20, [0x40]),
+        "0140": support_response(0x40, [0x42, 0x46]),
+    }
+    service = make_service(tmp_path, {("COM4", 38400): responses})
+
+    result = service.discover_pids()
+
+    decoded = {pid.pid for pid in result.decoded}
+    undecoded = {pid.pid for pid in result.undecoded}
+    assert {"04", "05", "0C", "0D", "20", "40", "42", "46"} <= decoded
+    assert {"12"} <= undecoded
+    assert any(pid.pid == "42" and pid.group == "Electrical" for pid in result.decoded)
 
 
 def test_probe_enhanced_protocols_reads_uds_vin_when_can_is_active(tmp_path: Path) -> None:

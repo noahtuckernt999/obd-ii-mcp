@@ -22,16 +22,19 @@ from obd_ii_mcp.models import (
     DataSeries,
     DataIdentifierReadResult,
     DecodedCode,
+    DisconnectResult,
     EnhancedProtocolProbe,
     FaultSnapshot,
     LiveDataCapture,
     LiveDataResult,
     PortCandidate,
     ProtocolProbeStep,
+    PidDiscoveryResult,
     SampleResult,
     SeriesPoint,
+    SupportedPid,
 )
-from obd_ii_mcp.pids import PID_DEFINITIONS, decode_pid_response, normalize_pid
+from obd_ii_mcp.pids import PID_DEFINITIONS, decode_pid_response, normalize_pid, pid_group, standard_pid_label
 from obd_ii_mcp.replay import LiveDataReplay
 from obd_ii_mcp.sessions import write_session
 from obd_ii_mcp.transport import SerialTransport, Transport, list_serial_ports, select_candidate_ports
@@ -52,6 +55,8 @@ READ_ONLY_DIDS = {
 READ_ONLY_ECU_HEADERS = {
     "7E0": "Engine ECU",
 }
+
+PID_DISCOVERY_STARTS = ["00", "20", "40", "60", "80", "A0", "C0"]
 
 
 class ObdService:
@@ -118,6 +123,16 @@ class ObdService:
                 return ConnectResult(ok=True, status=self.status(), candidates=candidates)
         raise NoAdapterFoundError("No ELM327-compatible adapter responded on candidate COM ports")
 
+    def disconnect(self) -> DisconnectResult:
+        released = self.transport is not None or self.protocol is not None or self.replay is not None
+        if self.transport is not None:
+            self.transport.close()
+        self.transport = None
+        self.protocol = None
+        self.replay = None
+        self.vin = None
+        return DisconnectResult(ok=True, status=self.status(), released=released)
+
     def ensure_connected(self) -> Elm327Protocol:
         if self.protocol is None:
             self.connect()
@@ -155,6 +170,31 @@ class ObdService:
             response = protocol.obd_query("01", normalized)
             values.append(decode_pid_response(normalized, response))
         return LiveDataResult(ok=True, values=values)
+
+    def discover_pids(self) -> PidDiscoveryResult:
+        if self.settings.replay_file is not None:
+            if self.replay is None:
+                self.connect()
+            assert self.replay is not None
+            supported = [_supported_pid(series.pid, source_label=series.label) for series in self.replay.capture.sample.series]
+            return _pid_discovery_result(self.status(), "replay_capture", supported)
+
+        protocol = self.ensure_connected()
+        discovered: dict[str, SupportedPid] = {}
+        start = "00"
+        while True:
+            response = protocol.obd_query("01", start)
+            pids = _supported_pids_from_response(start, response)
+            for pid in pids:
+                discovered[pid] = _supported_pid(pid)
+
+            next_start = f"{int(start, 16) + 0x20:02X}"
+            if next_start not in PID_DISCOVERY_STARTS or next_start not in discovered:
+                break
+            start = next_start
+
+        supported = [discovered[pid] for pid in sorted(discovered)]
+        return _pid_discovery_result(self.status(), "vehicle", supported)
 
     def sample_data(
         self,
@@ -408,6 +448,57 @@ def _adapter_value(
     value = " ".join(lines).strip() or None
     steps.append(ProtocolProbeStep(name=name, ok=True, request=command, response=lines, value=value))
     return value
+
+
+def _supported_pid(pid: str, source_label: str | None = None) -> SupportedPid:
+    normalized = pid.upper().replace("0X", "")
+    definition = PID_DEFINITIONS.get(normalized)
+    return SupportedPid(
+        pid=normalized,
+        decoded=definition is not None,
+        name=definition.name if definition else None,
+        label=definition.label if definition else source_label or standard_pid_label(normalized),
+        unit=definition.unit if definition else None,
+        group=pid_group(normalized),
+    )
+
+
+def _pid_discovery_result(
+    status,
+    source: str,
+    supported: list[SupportedPid],
+) -> PidDiscoveryResult:
+    decoded = [pid for pid in supported if pid.decoded]
+    undecoded = [pid for pid in supported if not pid.decoded]
+    return PidDiscoveryResult(
+        ok=True,
+        status=status,
+        source=source,
+        supported=supported,
+        decoded=decoded,
+        undecoded=undecoded,
+    )
+
+
+def _supported_pids_from_response(start_pid: str, lines: list[str]) -> list[str]:
+    start = int(start_pid, 16)
+    payload = _pid_support_payload(start, lines)
+    supported = []
+    for bit_index in range(32):
+        byte = payload[bit_index // 8]
+        mask = 1 << (7 - (bit_index % 8))
+        if byte & mask:
+            supported.append(f"{start + bit_index + 1:02X}")
+    return supported
+
+
+def _pid_support_payload(start_pid: int, lines: list[str]) -> list[int]:
+    for line in lines:
+        values = [int(token, 16) for token in line.split()]
+        for index in range(0, len(values) - 5):
+            if values[index] == 0x41 and values[index + 1] == start_pid:
+                return values[index + 2 : index + 6]
+    raise NoEcuResponseError(f"PID support response for {start_pid:02X} did not include a bitmask")
 
 
 def _extract_uds_did_payload(lines: list[str], did: str) -> list[int]:

@@ -19,6 +19,12 @@ def obd_connect() -> dict[str, Any]:
 
 
 @mcp.tool()
+def obd_disconnect() -> dict[str, Any]:
+    """Close the current adapter or replay session and release the serial port."""
+    return result_or_error(service.disconnect)
+
+
+@mcp.tool()
 def obd_status(read_vin: bool = False) -> dict[str, Any]:
     """Return adapter connection status, protocol metadata, and VIN when requested."""
     def action():
@@ -45,6 +51,12 @@ def obd_decode_code(code: str) -> dict[str, Any]:
 def obd_live_data(pids: list[str] | None = None) -> dict[str, Any]:
     """Read supported live OBD-II PIDs once."""
     return result_or_error(lambda: service.live_data(pids))
+
+
+@mcp.tool()
+def obd_discover_pids() -> dict[str, Any]:
+    """Discover which OBD-II mode 01 PIDs the vehicle reports as supported."""
+    return result_or_error(service.discover_pids)
 
 
 @mcp.tool()

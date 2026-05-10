@@ -34,6 +34,12 @@ class ConnectResult(BaseModel):
     candidates: list[PortCandidate] = Field(default_factory=list)
 
 
+class DisconnectResult(BaseModel):
+    ok: bool
+    status: ConnectionStatus
+    released: bool
+
+
 class Dtc(BaseModel):
     code: str
     description: str
@@ -68,6 +74,26 @@ class LiveValue(BaseModel):
 class LiveDataResult(BaseModel):
     ok: bool
     values: list[LiveValue]
+
+
+class SupportedPid(BaseModel):
+    mode: str = "01"
+    pid: str
+    supported: bool = True
+    decoded: bool
+    name: str | None = None
+    label: str
+    unit: str | None = None
+    group: str = "Other"
+
+
+class PidDiscoveryResult(BaseModel):
+    ok: bool
+    status: ConnectionStatus
+    source: str
+    supported: list[SupportedPid]
+    decoded: list[SupportedPid]
+    undecoded: list[SupportedPid]
 
 
 class SeriesPoint(BaseModel):
