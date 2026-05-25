@@ -403,7 +403,7 @@ def test_probe_enhanced_protocols_reads_uds_vin_when_can_is_active(tmp_path: Pat
         "ATCFC1": "OK\r>",
         "ATSH7E0": "OK\r>",
         "ATCRA7E8": "OK\r>",
-        "22F190": "7E8 10 14 62 F1 90 57 41\r7E8 21 55 5A 5A 5A 5A 5A\r>",
+        "22F190": "7E8 10 14 62 F1 90 54 45\r7E8 21 53 54 56 49 4E 31\r>",
     }
     service = make_service(tmp_path, {("COM4", 38400): responses})
 
@@ -422,7 +422,7 @@ def test_read_data_identifier_reads_allowlisted_vin(tmp_path: Path) -> None:
         "ATCFC1": "OK\r>",
         "ATSH7E0": "OK\r>",
         "ATCRA7E8": "OK\r>",
-        "22F190": "7E8 10 14 62 F1 90 57 41\r7E8 21 55 5A 5A 5A 5A 5A\r>",
+        "22F190": "7E8 10 14 62 F1 90 54 45\r7E8 21 53 54 56 49 4E 31\r>",
     }
     service = make_service(tmp_path, {("COM4", 38400): responses})
 
@@ -461,7 +461,7 @@ def test_read_data_identifier_reads_compact_can_frame_vin(tmp_path: Path) -> Non
         "ATCFC1": "OK\r>",
         "ATSH7E0": "OK\r>",
         "ATCRA7E8": "OK\r>",
-        "22F190": "7E8101462F190574155\r7E8215A5A5A3856334A\r7E82241303138383931\r>",
+        "22F190": "7E8101462F190544553\r7E8215456494E31323334\r7E822353637383930\r>",
     }
     service = make_service(tmp_path, {("COM4", 38400): responses})
 
@@ -470,23 +470,23 @@ def test_read_data_identifier_reads_compact_can_frame_vin(tmp_path: Path) -> Non
     assert result.ok is True
     assert result.value == "TESTVIN1234567890"
     assert result.raw_payload == [
-        "57",
-        "41",
-        "55",
-        "5A",
-        "5A",
-        "5A",
-        "38",
+        "54",
+        "45",
+        "53",
+        "54",
         "56",
-        "33",
-        "4A",
-        "41",
-        "30",
+        "49",
+        "4E",
         "31",
-        "38",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
         "38",
         "39",
-        "31",
+        "30",
     ]
 
 
