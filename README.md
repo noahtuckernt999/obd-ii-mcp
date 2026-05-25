@@ -98,7 +98,7 @@ uv run pytest
 uv run ruff check .
 ```
 
-On this machine, the WinGet `uv.exe` shim can be awkward from sandboxed shells. The repo virtualenv works directly:
+If `uv` is not available on your shell path, the repo virtualenv works directly after `uv sync --dev` has created it:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest --basetemp .pytest-cache-local\tmp -p no:cacheprovider
@@ -118,10 +118,10 @@ $env:OBD_MCP_SERIAL_PORTS = "COM4,COM9"
 uv run obd-ii-mcp
 ```
 
-On the current test setup, the adapter appears as `COM7`, so pinning the port avoids slow or confusing probing:
+If you know the adapter's COM port, pinning it avoids slow or confusing probing:
 
 ```powershell
-$env:OBD_MCP_SERIAL_PORTS = "COM7"
+$env:OBD_MCP_SERIAL_PORTS = "COM4"
 uv run obd-ii-mcp
 ```
 
@@ -133,7 +133,7 @@ Run the live dashboard:
 
 ```powershell
 $env:PYTHONPATH = "src"
-$env:OBD_MCP_SERIAL_PORTS = "COM7"
+$env:OBD_MCP_SERIAL_PORTS = "COM4"
 Remove-Item Env:OBD_MCP_REPLAY_FILE -ErrorAction SilentlyContinue
 .\.venv\Scripts\python.exe -m streamlit run src\obd_ii_mcp\dashboard.py
 ```
@@ -215,12 +215,12 @@ The decoder table currently covers the common live values plus the PIDs reported
 
 - Confirm the Bluetooth adapter is paired in Windows.
 - Check which COM ports Windows created for the adapter.
-- Set `OBD_MCP_SERIAL_PORTS` to the expected port, for example `COM7`.
+- Set `OBD_MCP_SERIAL_PORTS` to the expected port, for example `COM4`.
 - Make sure no other process is holding the port.
 
 ### Port Already In Use
 
-Windows allows only one process to open a serial port at a time. If the MCP server connected first, Streamlit cannot also open `COM7`; if Streamlit connected first, MCP cannot also open it.
+Windows allows only one process to open a serial port at a time. If the MCP server connected first, Streamlit cannot also open the same COM port; if Streamlit connected first, MCP cannot also open it.
 
 Release the adapter from the current owner:
 
@@ -241,7 +241,7 @@ Remove-Item Env:OBD_MCP_REPLAY_FILE -ErrorAction SilentlyContinue
 Pin the known port:
 
 ```powershell
-$env:OBD_MCP_SERIAL_PORTS = "COM7"
+$env:OBD_MCP_SERIAL_PORTS = "COM4"
 ```
 
 ## Development Notes

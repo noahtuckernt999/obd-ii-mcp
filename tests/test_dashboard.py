@@ -32,7 +32,7 @@ def make_capture(path: Path) -> Path:
         captured_at=started_at,
         status=ConnectionStatus(
             connected=True,
-            port="COM7",
+            port="COM4",
             baud_rate=38400,
             adapter_id="ELM327 v1.5",
             protocol="AUTO",
