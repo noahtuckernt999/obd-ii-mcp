@@ -1,45 +1,53 @@
 # obd-ii-mcp
 
-An MCP server for interrogating and gaining insights from a Bluetooth OBD-II scanner, with an initial focus on cheap VAG-compatible dongles and ELM327-style adapters.
+A read-only MCP server and Streamlit dashboard for ELM327-compatible OBD-II adapters.
 
-The goal is to let Claude, Codex, or any MCP-capable client safely talk to a car through a local server. The server should handle the low-level adapter session, expose a small set of diagnostic tools, and return structured data that an AI assistant can reason over without needing direct access to the vehicle bus.
+The project lets Claude, Codex, or any MCP-capable client safely talk to a car through a local server. The server owns the low-level ELM327 adapter session, exposes conservative diagnostic tools, and returns structured data that an AI assistant can reason over without needing raw vehicle-bus access.
 
-## What This Should Do
+The Streamlit dashboard provides a human-facing view for live data, replay files, PID discovery, charting, and capture management.
 
-- Connect to a paired Bluetooth OBD-II adapter.
-- Detect and initialise the adapter protocol.
-- Read live vehicle data such as RPM, coolant temperature, intake air temperature, vehicle speed, fuel trim, oxygen sensor values, and battery voltage.
-- Pull stored, pending, and permanent diagnostic trouble codes.
-- Decode common generic OBD-II fault codes.
-- Add manufacturer-aware context where possible, starting with VAG vehicles.
-- Capture time-series samples around a fault or symptom.
-- Produce graph-ready diagnostic data for MCP clients.
-- Optionally clear fault codes only when explicitly enabled and confirmed.
+## What It Does
+
+- Connects to a paired Bluetooth OBD-II adapter over a Windows COM port.
+- Detects and initialises an ELM327-style adapter.
+- Reads live Mode 01 PID data such as RPM, speed, temperatures, load, fuel trim, throttle, O2 values, voltage, fuel level, barometric pressure, and other discovered signals.
+- Discovers which Mode 01 PIDs the vehicle reports as supported.
+- Separates discovered PIDs into decoded and not-yet-decoded signals.
+- Reads stored, pending, and permanent diagnostic trouble codes.
+- Decodes common generic OBD-II fault codes.
+- Captures graph-ready time-series samples.
+- Records live sessions to replayable JSON files.
+- Replays captures without needing the car or adapter connected.
+- Releases the serial adapter explicitly with `obd_disconnect` or the dashboard **Disconnect** button.
+
+Clearing codes and other write/service operations are intentionally not implemented.
 
 ## MCP Tool Surface
 
-The first version should expose a conservative set of tools:
+The server exposes a conservative read-only tool surface:
 
 | Tool | Purpose |
 | --- | --- |
 | `obd_connect` | Connect to a configured Bluetooth adapter and initialise the OBD session. |
+| `obd_disconnect` | Close the active adapter or replay session and release the serial port. |
 | `obd_status` | Report adapter connection, vehicle protocol, VIN availability, and session health. |
 | `obd_read_codes` | Read stored, pending, and permanent DTCs. |
 | `obd_decode_code` | Explain a DTC using built-in generic definitions and any available manufacturer notes. |
 | `obd_live_data` | Read one or more supported PIDs once. |
+| `obd_discover_pids` | Discover which Mode 01 PIDs the vehicle reports as supported. |
 | `obd_sample_data` | Sample selected PIDs over time and return graph-ready series data. |
 | `obd_record_live_data` | Record selected live PIDs to a replayable local capture file. |
 | `obd_probe_enhanced_protocols` | Read-only probe for whether the current ELM327 session can carry UDS/KWP-style identity requests. |
 | `obd_read_data_identifier` | Read an allow-listed UDS service `22` identity data identifier on engine ECU header `7E0`. |
 | `obd_fault_snapshot` | Pull codes plus relevant live data in one diagnostic bundle. |
 
-Write/service tools such as clearing codes are intentionally deferred until after the read-only hardware path is reliable.
+Write/service tools such as clearing codes are deliberately out of scope.
 
 ## Safety Boundaries
 
-This project should default to read-only behaviour. Anything that changes vehicle state must be gated behind configuration and require an explicit tool call. The server should avoid exposing arbitrary raw CAN writes as an MCP tool.
+This project defaults to read-only behaviour. Anything that changes vehicle state must be gated behind configuration and require an explicit tool call. The server does not expose arbitrary raw CAN writes as an MCP tool.
 
-Initial safety rules:
+Safety rules:
 
 - Read-only mode is the default.
 - Clearing codes and other write/service actions are not implemented in v1.
@@ -47,26 +55,38 @@ Initial safety rules:
 - Tool responses should make uncertainty clear rather than over-diagnosing.
 - The server should never claim that a fault code alone proves a component has failed.
 
-## Architecture Plan
+## Architecture
 
 ```text
-MCP client
-  -> MCP server
-    -> OBD service layer
-      -> adapter transport
-        -> Bluetooth serial port
-          -> ELM327 / OBD-II adapter
-            -> vehicle ECU
+MCP client                  Streamlit dashboard
+    |                               |
+    v                               v
+MCP server                    ObdService
+    |                               |
+    +-----------> ObdService <------+
+                       |
+                       v
+                ELM327 protocol
+                       |
+                       v
+                Serial transport
+                       |
+                       v
+             Bluetooth COM port / replay file
+                       |
+                       v
+              ELM327 adapter -> vehicle ECU
 ```
 
-Suggested internal modules:
+Important modules:
 
 - `server`: MCP server bootstrap and tool registration.
-- `obd`: high-level diagnostic operations.
-- `transport`: Bluetooth serial connection handling.
-- `protocol`: ELM327 command/session handling and OBD-II PID parsing.
+- `service`: connection lifecycle, live reads, sampling, capture, replay, PID discovery, and diagnostic workflows.
+- `elm327`: ELM327 command/session handling.
+- `transport`: serial port I/O and fake transport for tests.
+- `pids`: Mode 01 PID metadata and decoders.
 - `dtc`: trouble-code parsing and definition lookup.
-- `sampling`: time-series collection for graph-ready responses.
+- `dashboard`: Streamlit live/replay dashboard.
 
 ## Local Setup
 
@@ -76,6 +96,13 @@ Install dependencies and run the test suite:
 uv sync --dev
 uv run pytest
 uv run ruff check .
+```
+
+On this machine, the WinGet `uv.exe` shim can be awkward from sandboxed shells. The repo virtualenv works directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest --basetemp .pytest-cache-local\tmp -p no:cacheprovider
+.\.venv\Scripts\python.exe -m ruff check .
 ```
 
 Start the MCP server over stdio:
@@ -91,7 +118,45 @@ $env:OBD_MCP_SERIAL_PORTS = "COM4,COM9"
 uv run obd-ii-mcp
 ```
 
-The first hardware call to make from an MCP client is `obd_connect`. It sends only adapter-initialisation commands in v1 and does not clear codes or perform service actions.
+On the current test setup, the adapter appears as `COM7`, so pinning the port avoids slow or confusing probing:
+
+```powershell
+$env:OBD_MCP_SERIAL_PORTS = "COM7"
+uv run obd-ii-mcp
+```
+
+The first hardware call to make from an MCP client is `obd_connect`. It sends only adapter-initialisation commands and does not clear codes or perform service actions. When you are done with the adapter, call `obd_disconnect` so another process can open the same COM port.
+
+## Streamlit Dashboard
+
+Run the live dashboard:
+
+```powershell
+$env:PYTHONPATH = "src"
+$env:OBD_MCP_SERIAL_PORTS = "COM7"
+Remove-Item Env:OBD_MCP_REPLAY_FILE -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -m streamlit run src\obd_ii_mcp\dashboard.py
+```
+
+Or use the installed script:
+
+```powershell
+uv run obd-ii-dashboard
+```
+
+The dashboard supports:
+
+- live adapter mode
+- replay file mode
+- adapter connect/disconnect
+- PID discovery
+- decoded signal selection
+- live metric cards
+- Altair time-series charts
+- recording live samples to `.obd-mcp/captures`
+- renaming and loading capture files
+
+Windows serial ports are exclusive. If Streamlit cannot connect to the adapter, another MCP server, Streamlit session, or Python process may still be holding the COM port. Use `obd_disconnect`, the dashboard **Disconnect** button, or stop the process that owns the adapter.
 
 ## Configuration
 
@@ -124,23 +189,64 @@ uv run obd-ii-mcp
 
 In replay mode, `obd_connect`, `obd_status`, `obd_live_data`, and `obd_sample_data` behave like a connected read-only vehicle session, cycling through the captured values over time.
 
-## First Milestone
+Run the dashboard against a replay file:
 
-- [x] Choose the implementation stack and MCP SDK.
-- [x] Add the MCP server entry point.
-- [x] Implement adapter configuration and connection status.
-- [x] Implement a mock transport for development without the car attached.
-- [x] Implement ELM327 initialisation commands.
-- [x] Implement reading and parsing generic DTCs.
-- [x] Implement basic PID reads for live data.
-- [x] Return graph-ready sampled PID data.
-- [x] Record and replay live-data captures for offline development.
-- [x] Add tests for DTC parsing and PID decoding.
-- [x] Document local setup with the Bluetooth dongle.
+```powershell
+$env:PYTHONPATH = "src"
+$env:OBD_MCP_REPLAY_FILE = ".obd-mcp\captures\<capture>.json"
+.\.venv\Scripts\python.exe -m streamlit run src\obd_ii_mcp\dashboard.py
+```
+
+Replay mode is the easiest way to reproduce graphs and screenshots without sitting in the car.
+
+## PID Discovery
+
+`obd_discover_pids` asks the vehicle which standard Mode 01 PIDs it supports. Support discovery is separate from decoding:
+
+- supported: the vehicle says it can answer this PID
+- decoded: this project has a decoder for the response bytes
+- undecoded: the vehicle supports it, but the app does not yet have a safe human-readable decoder
+
+The decoder table currently covers the common live values plus the PIDs reported by the development vehicle, including status and enum values such as fuel system status, OBD standard, fuel type, and oxygen sensors present. Numeric values are chartable in the dashboard; text/status values appear as live values but are not plotted as lines.
+
+## Troubleshooting
+
+### Adapter Not Found
+
+- Confirm the Bluetooth adapter is paired in Windows.
+- Check which COM ports Windows created for the adapter.
+- Set `OBD_MCP_SERIAL_PORTS` to the expected port, for example `COM7`.
+- Make sure no other process is holding the port.
+
+### Port Already In Use
+
+Windows allows only one process to open a serial port at a time. If the MCP server connected first, Streamlit cannot also open `COM7`; if Streamlit connected first, MCP cannot also open it.
+
+Release the adapter from the current owner:
+
+- MCP: call `obd_disconnect`
+- dashboard: click **Disconnect**
+- development fallback: stop the Python process that owns the adapter
+
+### Replay Keeps Loading Instead Of Live Mode
+
+Live mode should clear `OBD_MCP_REPLAY_FILE`. In PowerShell:
+
+```powershell
+Remove-Item Env:OBD_MCP_REPLAY_FILE -ErrorAction SilentlyContinue
+```
+
+### Slow Or Confusing Port Probing
+
+Pin the known port:
+
+```powershell
+$env:OBD_MCP_SERIAL_PORTS = "COM7"
+```
 
 ## Development Notes
 
-Cheap Bluetooth OBD-II adapters vary a lot in quality. We should build the project so the core diagnostic logic can be tested with a mock transport, then keep real adapter quirks isolated in the transport/protocol layers.
+Cheap Bluetooth OBD-II adapters vary a lot in quality. The core diagnostic logic is tested with a fake transport, and real adapter quirks are kept in the transport/protocol layers.
 
 For VAG-specific behaviour, the first useful layer is manufacturer-aware explanations and grouped context around generic OBD-II codes. Deeper VAG module scans may require protocols or tools beyond generic ELM327 OBD-II support, so that should be treated as a later milestone once the basic MCP server is reliable.
 

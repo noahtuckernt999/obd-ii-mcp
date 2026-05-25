@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from obd_ii_mcp.errors import UnsupportedPidError
 from obd_ii_mcp.models import DataSeries, LiveDataCapture, LiveDataResult, LiveValue
 from obd_ii_mcp.pids import PID_DEFINITIONS, normalize_pid
 
@@ -31,6 +32,11 @@ class LiveDataReplay:
 
         values = []
         for pid in selected:
+            if pid not in series_by_pid:
+                available = ", ".join(sorted(series_by_pid)) or "none"
+                raise UnsupportedPidError(
+                    f"Replay capture does not contain PID {pid}. Available PIDs: {available}"
+                )
             series = series_by_pid[pid]
             value = _value_at_offset(series, self.capture.sample.started_at, offset)
             definition = PID_DEFINITIONS[pid]

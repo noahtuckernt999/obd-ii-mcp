@@ -1,9 +1,12 @@
 from pathlib import Path
+from datetime import datetime, timedelta
+
+import pytest
 
 from obd_ii_mcp.config import Settings
-from obd_ii_mcp.errors import UnsupportedDataIdentifierError
-from obd_ii_mcp.models import PortCandidate
-from obd_ii_mcp.service import ObdService
+from obd_ii_mcp.errors import NoEcuResponseError, UnsupportedDataIdentifierError
+from obd_ii_mcp.models import ConnectionStatus, DataSeries, LiveDataCapture, PortCandidate, SampleResult, SeriesPoint
+from obd_ii_mcp.service import ObdService, result_or_error
 from obd_ii_mcp.transport import FakeTransport
 
 
@@ -42,6 +45,36 @@ def support_response(start: int, pids: list[int]) -> str:
     return f"41 {start:02X} {' '.join(f'{value:02X}' for value in payload)}\r>"
 
 
+def write_replay_capture(tmp_path: Path, series: list[DataSeries]) -> Path:
+    started_at = datetime(2026, 5, 10, 9, 0, 0)
+    sample = SampleResult(
+        ok=True,
+        started_at=started_at,
+        finished_at=started_at + timedelta(seconds=1),
+        interval_seconds=1,
+        series=series,
+    )
+    capture = LiveDataCapture(
+        ok=True,
+        captured_at=started_at,
+        status=ConnectionStatus(connected=True, port="COM4", baud_rate=38400, protocol="AUTO"),
+        sample=sample,
+    )
+    path = tmp_path / "capture.json"
+    path.write_text(capture.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+class TrackingFakeTransport(FakeTransport):
+    def __init__(self, port: str, baud_rate: int, responses: dict[str, str]) -> None:
+        super().__init__(port=port, baud_rate=baud_rate, responses=responses)
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+        super().close()
+
+
 def test_probe_skips_bad_ports_and_falls_back_baud(tmp_path: Path) -> None:
     service = make_service(tmp_path, {("COM9", 9600): BASE_INIT})
     result = service.connect()
@@ -65,6 +98,68 @@ def test_disconnect_closes_transport_and_clears_status(tmp_path: Path) -> None:
     assert transport.opened is False
     assert service.transport is None
     assert service.protocol is None
+
+
+def test_disconnect_when_already_disconnected_is_idempotent(tmp_path: Path) -> None:
+    service = make_service(tmp_path, {})
+
+    result = service.disconnect()
+
+    assert result.ok is True
+    assert result.released is False
+    assert result.status.connected is False
+
+
+def test_disconnect_clears_replay_state(tmp_path: Path) -> None:
+    capture_path = write_replay_capture(
+        tmp_path,
+        [
+            DataSeries(
+                pid="42",
+                name="control_module_voltage",
+                label="Control module voltage",
+                unit="V",
+                points=[SeriesPoint(timestamp=datetime(2026, 5, 10, 9, 0, 0), value=12.4)],
+            )
+        ],
+    )
+    service = ObdService(Settings(replay_file=capture_path, session_dir=tmp_path))
+    service.connect()
+
+    result = service.disconnect()
+
+    assert result.ok is True
+    assert result.released is True
+    assert result.status.connected is False
+    assert service.replay is None
+
+
+def test_failed_connect_attempts_close_failed_transports(tmp_path: Path) -> None:
+    transports: list[TrackingFakeTransport] = []
+
+    def factory(port: str, baud: int, _timeout: float) -> TrackingFakeTransport:
+        responses = BASE_INIT if port == "COM9" else {}
+        transport = TrackingFakeTransport(port=port, baud_rate=baud, responses=responses)
+        transports.append(transport)
+        return transport
+
+    service = ObdService(
+        Settings(session_dir=tmp_path, baud_rates=[38400]),
+        transport_factory=factory,
+        port_lister=lambda: [
+            PortCandidate(device="COM4", description="Standard Serial over Bluetooth link"),
+            PortCandidate(device="COM9", description="Standard Serial over Bluetooth link"),
+        ],
+    )
+
+    result = service.connect()
+
+    assert result.ok is True
+    assert result.status.port == "COM9"
+    assert transports[0].port == "COM4"
+    assert transports[0].opened is False
+    assert transports[0].close_count == 1
+    assert transports[1].opened is True
 
 
 def test_read_codes_with_fake_transport(tmp_path: Path) -> None:
@@ -119,6 +214,91 @@ def test_record_live_data_writes_replayable_capture(tmp_path: Path) -> None:
     assert result.values[0].value == 12.439
 
 
+def test_record_live_data_capture_contains_status_timestamps_and_multiple_series(tmp_path: Path) -> None:
+    responses = BASE_INIT | {
+        "0142": "41 42 30 97\r>",
+        "010D": "41 0D 28\r>",
+    }
+    service = make_service(tmp_path, {("COM4", 38400): responses})
+    service.settings.capture_dir = tmp_path / "captures"
+
+    capture = service.record_live_data(["42", "0D"], duration_seconds=0, interval_seconds=1)
+
+    assert capture.capture_file is not None
+    assert capture.status.connected is True
+    assert capture.status.port == "COM4"
+    assert capture.sample.started_at <= capture.sample.finished_at
+    assert capture.sample.interval_seconds == 1
+    assert {series.pid for series in capture.sample.series} == {"42", "0D"}
+    assert {series.label for series in capture.sample.series} == {
+        "Control module voltage",
+        "Vehicle speed",
+    }
+    assert {series.unit for series in capture.sample.series} == {"V", "km/h"}
+    assert all(series.points for series in capture.sample.series)
+
+
+def test_replay_live_data_filters_requested_pids_and_cycles_points(tmp_path: Path) -> None:
+    started_at = datetime(2026, 5, 10, 9, 0, 0)
+    capture_path = write_replay_capture(
+        tmp_path,
+        [
+            DataSeries(
+                pid="42",
+                name="control_module_voltage",
+                label="Control module voltage",
+                unit="V",
+                points=[
+                    SeriesPoint(timestamp=started_at, value=12.1),
+                    SeriesPoint(timestamp=started_at + timedelta(seconds=1), value=12.6),
+                ],
+            ),
+            DataSeries(
+                pid="0D",
+                name="vehicle_speed",
+                label="Vehicle speed",
+                unit="km/h",
+                points=[
+                    SeriesPoint(timestamp=started_at, value=0),
+                    SeriesPoint(timestamp=started_at + timedelta(seconds=1), value=40),
+                ],
+            ),
+        ],
+    )
+    service = ObdService(Settings(replay_file=capture_path, session_dir=tmp_path))
+    service.connect()
+    assert service.replay is not None
+
+    service.replay.started_at = datetime.now()
+    first = service.live_data(["42"])
+    service.replay.started_at = datetime.now() - timedelta(seconds=0.9)
+    later = service.live_data(["42"])
+
+    assert [value.pid for value in first.values] == ["42"]
+    assert first.values[0].value == 12.1
+    assert later.values[0].value == 12.6
+
+
+def test_replay_live_data_unknown_requested_pid_raises_structured_error(tmp_path: Path) -> None:
+    capture_path = write_replay_capture(
+        tmp_path,
+        [
+            DataSeries(
+                pid="42",
+                name="control_module_voltage",
+                label="Control module voltage",
+                unit="V",
+                points=[SeriesPoint(timestamp=datetime(2026, 5, 10, 9, 0, 0), value=12.4)],
+            )
+        ],
+    )
+    service = ObdService(Settings(replay_file=capture_path, session_dir=tmp_path))
+
+    payload = result_or_error(lambda: service.live_data(["0C"]))
+
+    assert payload["error"] == "unsupported_pid"
+
+
 def test_discover_pids_returns_decoded_and_undecoded_supported_pids(tmp_path: Path) -> None:
     responses = BASE_INIT | {
         "0100": support_response(0x00, [0x04, 0x05, 0x0C, 0x0D, 0x12, 0x20]),
@@ -134,6 +314,83 @@ def test_discover_pids_returns_decoded_and_undecoded_supported_pids(tmp_path: Pa
     assert {"04", "05", "0C", "0D", "20", "40", "42", "46"} <= decoded
     assert {"12"} <= undecoded
     assert any(pid.pid == "42" and pid.group == "Electrical" for pid in result.decoded)
+
+
+def test_discover_pids_stops_without_continuation_marker(tmp_path: Path) -> None:
+    responses = BASE_INIT | {
+        "0100": support_response(0x00, [0x04, 0x05]),
+        "0120": support_response(0x20, [0x21]),
+    }
+    service = make_service(tmp_path, {("COM4", 38400): responses})
+
+    result = service.discover_pids()
+
+    assert {pid.pid for pid in result.supported} == {"04", "05"}
+
+
+def test_discover_pids_follows_continuation_markers_through_60(tmp_path: Path) -> None:
+    responses = BASE_INIT | {
+        "0100": support_response(0x00, [0x04, 0x20]),
+        "0120": support_response(0x20, [0x40]),
+        "0140": support_response(0x40, [0x60]),
+        "0160": support_response(0x60, [0x61]),
+    }
+    service = make_service(tmp_path, {("COM4", 38400): responses})
+
+    result = service.discover_pids()
+
+    assert {pid.pid for pid in result.supported} == {"04", "20", "40", "60", "61"}
+
+
+def test_discover_pids_malformed_support_bitmask_raises_obd_error(tmp_path: Path) -> None:
+    responses = BASE_INIT | {
+        "0100": "41 00 80 00 00\r>",
+    }
+    service = make_service(tmp_path, {("COM4", 38400): responses})
+
+    with pytest.raises(NoEcuResponseError, match="did not include a bitmask"):
+        service.discover_pids()
+
+
+def test_replay_discovery_introspects_capture_series_and_preserves_unknown_labels(tmp_path: Path) -> None:
+    capture_path = write_replay_capture(
+        tmp_path,
+        [
+            DataSeries(
+                pid="42",
+                name="control_module_voltage",
+                label="Control module voltage",
+                unit="V",
+                points=[SeriesPoint(timestamp=datetime(2026, 5, 10, 9, 0, 0), value=12.4)],
+            ),
+            DataSeries(
+                pid="AA",
+                name="manufacturer_specific_signal",
+                label="Manufacturer specific signal",
+                unit="raw",
+                points=[SeriesPoint(timestamp=datetime(2026, 5, 10, 9, 0, 0), value="01 02")],
+            ),
+        ],
+    )
+    service = ObdService(Settings(replay_file=capture_path, session_dir=tmp_path))
+
+    result = service.discover_pids()
+
+    assert result.source == "replay_capture"
+    assert {pid.pid for pid in result.supported} == {"42", "AA"}
+    assert {pid.pid for pid in result.decoded} == {"42"}
+    assert {pid.pid for pid in result.undecoded} == {"AA"}
+    assert result.undecoded[0].label == "Manufacturer specific signal"
+    assert result.status.protocol == "replay"
+
+
+def test_result_or_error_returns_structured_obd_error(tmp_path: Path) -> None:
+    service = make_service(tmp_path, {})
+
+    payload = result_or_error(service.connect)
+
+    assert payload["error"] == "no_adapter_found"
+    assert "No ELM327-compatible adapter" in payload["message"]
 
 
 def test_probe_enhanced_protocols_reads_uds_vin_when_can_is_active(tmp_path: Path) -> None:

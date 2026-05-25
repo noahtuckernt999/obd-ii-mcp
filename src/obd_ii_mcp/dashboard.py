@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+import pandas as pd
 import altair as alt
 import streamlit as st
 
@@ -400,36 +401,44 @@ def _render_chart(selected_pids: list[str], autoscale: bool) -> None:
         st.info("Start streaming to see live data.")
         return
 
-    chart_rows = [
+    chart_rows = _chart_rows(st.session_state.samples, selected_pids)
+    if not chart_rows:
+        st.info("No numeric samples available yet.")
+        return
+
+    try:
+        y_scale = alt.Scale(zero=False) if autoscale else alt.Scale(zero=True)
+        chart = (
+            alt.Chart(pd.DataFrame(chart_rows))
+            .mark_line()
+            .encode(
+                x=alt.X("seconds:Q", title="seconds"),
+                y=alt.Y("value:Q", title="value", scale=y_scale),
+                color=alt.Color("signal:N", title="signal"),
+                tooltip=[
+                    alt.Tooltip("seconds:Q", format=".3f"),
+                    alt.Tooltip("value:Q", format=".3f"),
+                    alt.Tooltip("signal:N"),
+                ],
+            )
+            .properties(height=420)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except Exception as error:
+        st.warning(f"Chart rendering failed: {error}")
+        st.dataframe(chart_rows, use_container_width=True)
+
+
+def _chart_rows(samples: list[dict[str, Any]], selected_pids: list[str]) -> list[dict[str, Any]]:
+    return [
         {
             "seconds": sample.get("elapsed_seconds", 0),
             "signal": sample["label"],
             "value": sample["value"],
         }
-        for sample in st.session_state.samples
+        for sample in samples
         if sample["pid"] in selected_pids and isinstance(sample["value"], int | float)
     ]
-    if not chart_rows:
-        st.info("No numeric samples available yet.")
-        return
-
-    y_scale = alt.Scale(zero=False) if autoscale else alt.Scale(zero=True)
-    chart = (
-        alt.Chart(alt.Data(values=chart_rows))
-        .mark_line()
-        .encode(
-            x=alt.X("seconds:Q", title="seconds"),
-            y=alt.Y("value:Q", title="value", scale=y_scale),
-            color=alt.Color("signal:N", title="signal"),
-            tooltip=[
-                alt.Tooltip("seconds:Q", format=".3f"),
-                alt.Tooltip("value:Q", format=".3f"),
-                alt.Tooltip("signal:N"),
-            ],
-        )
-        .properties(height=420)
-    )
-    st.altair_chart(chart, use_container_width=True)
 
 
 def _read_once(service: ObdService, selected_pids: list[str]) -> None:
