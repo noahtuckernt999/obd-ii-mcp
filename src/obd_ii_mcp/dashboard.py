@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+import pandas as pd
 import altair as alt
 import streamlit as st
 
@@ -43,6 +44,7 @@ def _ensure_state() -> None:
     st.session_state.setdefault("samples", [])
     st.session_state.setdefault("last_error", None)
     st.session_state.setdefault("connection_message", None)
+    st.session_state.setdefault("pid_discovery", None)
     st.session_state.setdefault("loaded_replay_file", None)
     st.session_state.setdefault("last_stream_wall", None)
     st.session_state.setdefault("next_elapsed_seconds", 0.0)
@@ -51,6 +53,7 @@ def _ensure_state() -> None:
     st.session_state.setdefault("recording_samples", [])
     st.session_state.setdefault("capture_name", "")
     st.session_state.setdefault("last_capture_file", None)
+    st.session_state.setdefault("selected_pids", DEFAULT_PIDS.copy())
 
 
 def _default_source() -> str:
@@ -93,6 +96,8 @@ def _reset_view() -> None:
     st.session_state.recording_samples = []
     st.session_state.capture_name = ""
     st.session_state.connection_message = None
+    st.session_state.pid_discovery = None
+    st.session_state.selected_pids = DEFAULT_PIDS.copy()
 
 
 def _status_badge(service: ObdService) -> None:
@@ -105,6 +110,68 @@ def _status_badge(service: ObdService) -> None:
         )
     else:
         st.warning("Not connected")
+
+
+def _obd_error_message(error: ObdError) -> str:
+    return str(error) or error.code
+
+
+def _discover_pids(service: ObdService) -> None:
+    try:
+        with st.spinner("Discovering supported PIDs..."):
+            result = service.discover_pids()
+        st.session_state.pid_discovery = result.model_dump()
+        decoded = [pid["pid"] for pid in st.session_state.pid_discovery["decoded"]]
+        if decoded:
+            current = [pid for pid in st.session_state.selected_pids if pid in decoded]
+            st.session_state.selected_pids = current or decoded[: min(len(decoded), 6)]
+        st.session_state.last_error = None
+    except ObdError as error:
+        st.session_state.last_error = _obd_error_message(error)
+    except Exception as error:
+        st.session_state.last_error = str(error)
+
+
+def _render_signal_picker() -> list[str]:
+    discovery = st.session_state.pid_discovery
+    if discovery is None:
+        pid_options = _pid_options()
+        selected = st.multiselect(
+            "Signals",
+            options=list(pid_options),
+            default=[pid for pid in st.session_state.selected_pids if pid in pid_options],
+            format_func=pid_options.__getitem__,
+        )
+        st.session_state.selected_pids = selected
+        return selected
+
+    decoded = discovery["decoded"]
+    undecoded = discovery["undecoded"]
+    st.caption(f"{len(decoded)} decoded signals; {len(undecoded)} more supported by source.")
+
+    selected = set(st.session_state.selected_pids)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in decoded:
+        grouped.setdefault(item["group"], []).append(item)
+
+    for group in sorted(grouped):
+        with st.expander(group, expanded=True):
+            for item in sorted(grouped[group], key=lambda value: value["label"]):
+                label = f"{item['label']} ({item['unit']})" if item["unit"] else item["label"]
+                checked = st.checkbox(label, value=item["pid"] in selected, key=f"signal_{item['pid']}")
+                if checked:
+                    selected.add(item["pid"])
+                else:
+                    selected.discard(item["pid"])
+
+    if undecoded:
+        with st.expander("Available but not decoded", expanded=False):
+            for item in undecoded:
+                st.caption(f"{item['pid']} - {item['label']}")
+
+    ordered = [item["pid"] for item in decoded if item["pid"] in selected]
+    st.session_state.selected_pids = ordered
+    return ordered
 
 
 def _append_values(values: list[LiveValue]) -> None:
@@ -168,7 +235,7 @@ def _preload_replay_samples(service: ObdService) -> None:
         st.session_state.next_elapsed_seconds = _latest_elapsed_seconds()
         st.session_state.last_error = None
     except ObdError as error:
-        st.session_state.last_error = error.message
+        st.session_state.last_error = _obd_error_message(error)
     except Exception as error:
         st.session_state.last_error = str(error)
 
@@ -334,43 +401,51 @@ def _render_chart(selected_pids: list[str], autoscale: bool) -> None:
         st.info("Start streaming to see live data.")
         return
 
-    chart_rows = [
+    chart_rows = _chart_rows(st.session_state.samples, selected_pids)
+    if not chart_rows:
+        st.info("No numeric samples available yet.")
+        return
+
+    try:
+        y_scale = alt.Scale(zero=False) if autoscale else alt.Scale(zero=True)
+        chart = (
+            alt.Chart(pd.DataFrame(chart_rows))
+            .mark_line()
+            .encode(
+                x=alt.X("seconds:Q", title="seconds"),
+                y=alt.Y("value:Q", title="value", scale=y_scale),
+                color=alt.Color("signal:N", title="signal"),
+                tooltip=[
+                    alt.Tooltip("seconds:Q", format=".3f"),
+                    alt.Tooltip("value:Q", format=".3f"),
+                    alt.Tooltip("signal:N"),
+                ],
+            )
+            .properties(height=420)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except Exception as error:
+        st.warning(f"Chart rendering failed: {error}")
+        st.dataframe(chart_rows, use_container_width=True)
+
+
+def _chart_rows(samples: list[dict[str, Any]], selected_pids: list[str]) -> list[dict[str, Any]]:
+    return [
         {
             "seconds": sample.get("elapsed_seconds", 0),
             "signal": sample["label"],
             "value": sample["value"],
         }
-        for sample in st.session_state.samples
+        for sample in samples
         if sample["pid"] in selected_pids and isinstance(sample["value"], int | float)
     ]
-    if not chart_rows:
-        st.info("No numeric samples available yet.")
-        return
-
-    y_scale = alt.Scale(zero=False) if autoscale else alt.Scale(zero=True)
-    chart = (
-        alt.Chart(alt.Data(values=chart_rows))
-        .mark_line()
-        .encode(
-            x=alt.X("seconds:Q", title="seconds"),
-            y=alt.Y("value:Q", title="value", scale=y_scale),
-            color=alt.Color("signal:N", title="signal"),
-            tooltip=[
-                alt.Tooltip("seconds:Q", format=".3f"),
-                alt.Tooltip("value:Q", format=".3f"),
-                alt.Tooltip("signal:N"),
-            ],
-        )
-        .properties(height=420)
-    )
-    st.altair_chart(chart, use_container_width=True)
 
 
 def _read_once(service: ObdService, selected_pids: list[str]) -> None:
     try:
         result = service.live_data(selected_pids)
     except ObdError as error:
-        st.session_state.last_error = error.message
+        st.session_state.last_error = _obd_error_message(error)
         st.session_state.streaming = False
         return
     except Exception as error:
@@ -392,7 +467,6 @@ def app() -> None:
 
     service = _service(st.session_state.source, st.session_state.selected_replay_file)
     _preload_replay_samples(service)
-    pid_options = _pid_options()
 
     st.title("OBD-II Live")
 
@@ -450,15 +524,23 @@ def app() -> None:
             st.caption(st.session_state.connection_message)
 
         connected = service.status().connected
-        connect_label = "Reconnect" if connected else "Connect"
+        connect_label = "Disconnect" if connected else "Connect"
         if st.button(connect_label, use_container_width=True):
             if connected:
-                status = service.status()
-                st.session_state.connection_message = (
-                    f"Still connected to {status.adapter_id or 'adapter'}"
-                    f" on {status.port or 'unknown port'}"
-                )
-                st.session_state.last_error = None
+                try:
+                    result = service.disconnect()
+                    st.session_state.streaming = False
+                    st.session_state.recording = False
+                    st.session_state.connection_message = (
+                        "Adapter released" if result.released else "No adapter session was active"
+                    )
+                    st.session_state.last_error = None
+                except ObdError as error:
+                    st.session_state.connection_message = "Disconnect failed"
+                    st.session_state.last_error = _obd_error_message(error)
+                except Exception as error:
+                    st.session_state.connection_message = "Disconnect failed"
+                    st.session_state.last_error = str(error)
             else:
                 st.session_state.connection_message = "Connecting to adapter..."
                 try:
@@ -472,19 +554,17 @@ def app() -> None:
                     st.session_state.last_error = None
                 except ObdError as error:
                     st.session_state.connection_message = "Connection failed"
-                    st.session_state.last_error = error.message
+                    st.session_state.last_error = _obd_error_message(error)
                 except Exception as error:
                     st.session_state.connection_message = "Connection failed"
                     st.session_state.last_error = str(error)
             st.rerun()
+        if st.button("Discover PIDs", use_container_width=True):
+            _discover_pids(service)
+            st.rerun()
 
         st.header("Stream")
-        selected_pids = st.multiselect(
-            "Signals",
-            options=list(pid_options),
-            default=DEFAULT_PIDS,
-            format_func=pid_options.__getitem__,
-        )
+        selected_pids = _render_signal_picker()
         interval_seconds = st.slider("Interval", 0.25, 5.0, 1.0, 0.25, format="%.2f s")
         max_points = st.slider("History", 20, 600, 120, 20, format="%d samples")
         autoscale = st.toggle("Autoscale chart", value=True)
